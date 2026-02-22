@@ -1,0 +1,41 @@
+datasource db {
+  provider = "mysql"
+}
+
+
+model Supplier {
+  id        Int       @id @default(autoincrement())
+  name      String
+  riskScore Float     @default(0)
+  events    Event[]
+  invoices  Invoice[]
+  createdAt DateTime  @default(now())
+}
+
+model Event {
+  id         Int      @id @default(autoincrement())
+  supplier   Supplier @relation(fields: [supplierId], references: [id])
+  supplierId Int
+  type       String
+  severity   Float
+  impactCost Float
+  confidence Float
+  createdAt  DateTime @default(now())
+}
+
+model Invoice {
+  id         Int      @id @default(autoincrement())
+  supplier   Supplier @relation(fields: [supplierId], references: [id])
+  supplierId Int
+  amount     Float
+  status     String
+  createdAt  DateTime @default(now())
+}
+
+model DecisionLog {
+  id          Int      @id @default(autoincrement())
+  invoiceId   Int
+  riskScore   Float
+  explanation String
+  createdAt   DateTime @default(now())
+}
