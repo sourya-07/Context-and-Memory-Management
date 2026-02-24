@@ -1,5 +1,7 @@
 const prisma = require("../config/prisma")
+const { redisClient } = require("../config/redis")
 const { getSupplierRisk } = require("./riskService")
+
 
 async function processInvoice(supplierId, amount) {
 
