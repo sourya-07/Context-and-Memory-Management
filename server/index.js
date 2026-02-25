@@ -2,12 +2,14 @@ const express = require("express")
 const dotenv = require("dotenv")
 const invoiceRoutes = require("./routes/invoiceRoutes")
 const { connectRedis } = require("./config/redis")
+const cors = require("cors")
 
 dotenv.config()
 
 const app = express()
 const port = process.env.PORT || 5080
 
+app.use(cors())
 app.use(express.json())
 
 app.get("/", (req, res) => {
