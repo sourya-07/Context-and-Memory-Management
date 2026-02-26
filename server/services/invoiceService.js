@@ -3,7 +3,11 @@ const { getSupplierRisk } = require("./riskService")
 
 
 async function processInvoice(supplierId, amount) {
-
+    const id = parseInt(supplierId)
+    const supplier = await prisma.supplier.findUnique({ where: { id } })
+    if (!supplier) {
+        throw new Error('Supplier not found')
+    }
     // 1. Save invoice
     const invoice = await prisma.invoice.create({
         data: {
@@ -76,7 +80,15 @@ async function getInvoiceById(invoiceId) {
     }
 }
 
+async function getAllInvoices() {
+    const invoices = await prisma.invoice.findMany({
+        orderBy: { id: "desc" }
+    })
+    return invoices
+}
+
 module.exports = {
     processInvoice,
-    getInvoiceById
+    getInvoiceById,
+    getAllInvoices
 }

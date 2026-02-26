@@ -1,4 +1,4 @@
-const { processInvoice, getInvoiceById } = require("../services/invoiceService")
+const { processInvoice, getInvoiceById, getAllInvoices } = require("../services/invoiceService")
 
 async function createInvoice(req, res) {
     try {
@@ -39,7 +39,18 @@ async function fetchInvoice(req, res) {
     }
 }
 
+// Get All Invoices
+async function fetchAllInvoices(req, res) {
+    try {
+        const invoices = await getAllInvoices()
+        res.json(invoices)
+    } catch (error) {
+        res.status(500).json({ error: "Failed to fetch invoices" })
+    }
+}
+
 module.exports = {
     createInvoice,
-    fetchInvoice
+    fetchInvoice,
+    fetchAllInvoices
 }

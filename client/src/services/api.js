@@ -25,3 +25,14 @@ export async function getInvoice(id) {
 
   return response.json()
 }
+
+
+export async function getAllInvoices() {
+  const response = await fetch(`${BASE_URL}/invoice`)
+
+  if (!response.ok) {
+    throw new Error("Failed to fetch invoices")
+  }
+
+  return response.json()
+}
