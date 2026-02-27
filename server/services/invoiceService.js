@@ -1,67 +1,96 @@
+// invoiceService.js
+// Handles the full lifecycle of an invoice:
+//   1. Save it to the database
+//   2. Run the AI context analysis (4-layer memory system)
+//   3. Make a risk-based decision (APPROVED / REVIEW / HOLD)
+//   4. Store the decision log for future reference
+
 const prisma = require("../config/prisma")
 const { getSupplierRisk } = require("./riskService")
 const { buildContext } = require("./contextService")
 
-async function processInvoice(supplierId, amount) {
-    const id = parseInt(supplierId)
-    const supplier = await prisma.supplier.findUnique({ where: { id } })
-    if (!supplier) {
-        throw new Error("Supplier not found")
-    }
+// Risk thresholds for decision making
+const HIGH_RISK_THRESHOLD = 0.6   // above this → put invoice on HOLD
+const MODERATE_RISK_THRESHOLD = 0.3  // above this → flag for REVIEW
 
-    // 1. Save invoice
-    const invoice = await prisma.invoice.create({
+// ─────────────────────────────────────────────────────────────────────────────
+// Process a new invoice — the main function called when someone submits the form.
+//
+// Steps:
+//   1. Verify the supplier exists
+//   2. Save the invoice with PENDING status
+//   3. Build the AI context (4-layer memory analysis)
+//   4. Determine risk level and update the invoice status
+//   5. Save the decision log with a full context snapshot
+// ─────────────────────────────────────────────────────────────────────────────
+async function processNewInvoice(supplierId, invoiceAmount) {
+    const id = parseInt(supplierId)
+
+    // Make sure the supplier exists before doing anything
+    const supplier = await prisma.supplier.findUnique({ where: { id } })
+    if (!supplier) throw new Error("Supplier not found")
+
+    // Step 1: Save the invoice with a PENDING status (will be updated after analysis)
+    const savedInvoice = await prisma.invoice.create({
         data: {
             supplierId: id,
-            amount,
+            amount: invoiceAmount,
             status: "PENDING",
         },
     })
 
-    // 2. Build full 4-layer context (uses Redis cache when available)
-    const context = await buildContext(id, { invoiceAmount: amount, invoiceId: invoice.id })
-
-    // 3. Get risk from context (already computed inside buildContext)
-    const risk = context.immediateContext.currentRiskScore
-
-    // 4. Decide recommendation + status
-    let recommendation = "Safe to Approve"
-    let status = "APPROVED"
-
-    if (risk > 0.6) {
-        recommendation = "High Risk – Mandate quality inspection before payment"
-        status = "HOLD"
-    } else if (risk > 0.3) {
-        recommendation = "Moderate Risk – Request documentation review"
-        status = "REVIEW"
-    }
-
-    // 5. Update invoice status
-    await prisma.invoice.update({
-        where: { id: invoice.id },
-        data: { status },
+    // Step 2: Build the full 4-layer AI context for this supplier
+    // (Redis-cached if available, so repeated requests are fast)
+    const aiContext = await buildContext(id, {
+        invoiceAmount,
+        invoiceId: savedInvoice.id,
     })
 
-    // 6. Save decision log with full context snapshot
+    const riskScore = aiContext.immediateContext.currentRiskScore
+
+    // Step 3: Decide what to do based on the risk score
+    let decisionLabel = "Safe to Approve"
+    let invoiceStatus = "APPROVED"
+
+    if (riskScore > HIGH_RISK_THRESHOLD) {
+        decisionLabel = "High Risk — Mandate quality inspection before payment"
+        invoiceStatus = "HOLD"
+    } else if (riskScore > MODERATE_RISK_THRESHOLD) {
+        decisionLabel = "Moderate Risk — Request documentation review"
+        invoiceStatus = "REVIEW"
+    }
+
+    // Step 4: Update the invoice status now that we have a decision
+    await prisma.invoice.update({
+        where: { id: savedInvoice.id },
+        data: { status: invoiceStatus },
+    })
+
+    // Step 5: Save the decision log
+    // We store the full context snapshot in JSON so we can replay the decision later
     await prisma.decisionLog.create({
         data: {
-            invoiceId: invoice.id,
-            riskScore: risk,
-            explanation: context.explanation,
-            contextSnapshot: JSON.stringify(context),
+            invoiceId: savedInvoice.id,
+            riskScore,
+            explanation: aiContext.explanation,
+            contextSnapshot: JSON.stringify(aiContext),
         },
     })
 
     return {
-        invoiceId: invoice.id,
-        risk,
-        recommendation,
-        status,
-        context,
+        invoiceId: savedInvoice.id,
+        risk: riskScore,
+        recommendation: decisionLabel,
+        status: invoiceStatus,
+        context: aiContext,
     }
 }
 
-async function getInvoiceById(invoiceId) {
+// ─────────────────────────────────────────────────────────────────────────────
+// Get a single invoice with its AI decision and the full context snapshot.
+// Used on the Invoice Details page.
+// ─────────────────────────────────────────────────────────────────────────────
+async function fetchInvoiceWithDecision(invoiceId) {
     const invoice = await prisma.invoice.findUnique({
         where: { id: parseInt(invoiceId) },
         include: { supplier: true },
@@ -69,44 +98,56 @@ async function getInvoiceById(invoiceId) {
 
     if (!invoice) throw new Error("Invoice not found")
 
-    const decision = await prisma.decisionLog.findFirst({
+    // Look up the AI decision that was made when this invoice was processed
+    const decisionRecord = await prisma.decisionLog.findFirst({
         where: { invoiceId: invoice.id },
     })
 
-    let parsedContext = null
-    if (decision?.contextSnapshot) {
+    // Parse the stored JSON snapshot back into an object
+    let contextSnapshot = null
+    if (decisionRecord?.contextSnapshot) {
         try {
-            parsedContext = JSON.parse(decision.contextSnapshot)
-        } catch (e) {
-            parsedContext = null
+            contextSnapshot = JSON.parse(decisionRecord.contextSnapshot)
+        } catch {
+            // If parsing fails (e.g. corrupted data), just return null — the UI handles it
+            contextSnapshot = null
         }
     }
 
     return {
         invoice,
-        decision: decision
+        decision: decisionRecord
             ? {
-                id: decision.id,
-                invoiceId: decision.invoiceId,
-                riskScore: decision.riskScore,
-                explanation: decision.explanation,
-                createdAt: decision.createdAt,
+                id: decisionRecord.id,
+                invoiceId: decisionRecord.invoiceId,
+                riskScore: decisionRecord.riskScore,
+                explanation: decisionRecord.explanation,
+                createdAt: decisionRecord.createdAt,
             }
             : null,
-        context: parsedContext,
+        context: contextSnapshot,
     }
 }
 
-async function getAllInvoices() {
-    const invoices = await prisma.invoice.findMany({
+// ─────────────────────────────────────────────────────────────────────────────
+// Get all invoices — used to populate the Dashboard table.
+// Returns most recent first.
+// ─────────────────────────────────────────────────────────────────────────────
+async function listAllInvoices() {
+    return prisma.invoice.findMany({
         orderBy: { id: "desc" },
-        include: { supplier: { select: { name: true } } },
+        include: {
+            supplier: { select: { name: true } },
+        },
     })
-    return invoices
 }
 
 module.exports = {
-    processInvoice,
-    getInvoiceById,
-    getAllInvoices,
+    processNewInvoice,
+    fetchInvoiceWithDecision,
+    listAllInvoices,
+    // Backward-compatible aliases matching the original exported names
+    processInvoice: processNewInvoice,
+    getInvoiceById: fetchInvoiceWithDecision,
+    getAllInvoices: listAllInvoices,
 }

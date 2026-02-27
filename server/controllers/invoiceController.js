@@ -1,56 +1,62 @@
+//   POST /invoice         — process a new invoice through the AI system
+//   GET  /invoice/:id     — get an invoice with its AI decision and context
+//   GET  /invoice         — get all invoices (for the dashboard table)
+
 const { processInvoice, getInvoiceById, getAllInvoices } = require("../services/invoiceService")
 
-async function createInvoice(req, res) {
+// POST /invoice
+// Accepts supplierId and amount, runs the AI context analysis,
+// and returns the invoice ID plus the risk decision.
+async function handleCreateInvoice(req, res) {
     try {
         const { supplierId, amount } = req.body
 
-        // Basic validation
         if (!supplierId || !amount) {
             return res.status(400).json({
-                error: "supplierId and amount are required"
+                error: "Both supplierId and amount are required to process an invoice.",
             })
         }
 
         const result = await processInvoice(supplierId, amount)
 
         res.status(201).json(result)
-
     } catch (error) {
-        console.error(error)
-        res.status(500).json({
-            error: "Internal server error"
-        })
+        console.error("[InvoiceController] Error processing invoice:", error)
+        res.status(500).json({ error: "Something went wrong while processing the invoice." })
     }
 }
 
-// Get Invoice by ID
-async function fetchInvoice(req, res) {
+// GET /invoice/:id
+// Returns a single invoice with its AI decision and the full context snapshot.
+async function handleFetchInvoice(req, res) {
     try {
-        const { id } = req.params
-
-        const result = await getInvoiceById(id)
-
+        const invoiceId = req.params.id
+        const result = await getInvoiceById(invoiceId)
         res.json(result)
-
     } catch (error) {
-        res.status(404).json({
-            error: error.message
-        })
+        // getInvoiceById throws if the invoice doesn't exist
+        res.status(404).json({ error: error.message })
     }
 }
 
-// Get All Invoices
-async function fetchAllInvoices(req, res) {
+// GET /invoice
+// Returns all invoices for the dashboard, most recent first.
+async function handleFetchAllInvoices(req, res) {
     try {
-        const invoices = await getAllInvoices()
-        res.json(invoices)
+        const allInvoices = await getAllInvoices()
+        res.json(allInvoices)
     } catch (error) {
-        res.status(500).json({ error: "Failed to fetch invoices" })
+        console.error("[InvoiceController] Error fetching invoices:", error)
+        res.status(500).json({ error: "Could not fetch invoices." })
     }
 }
 
 module.exports = {
-    createInvoice,
-    fetchInvoice,
-    fetchAllInvoices
+    handleCreateInvoice,
+    handleFetchInvoice,
+    handleFetchAllInvoices,
+    // Backward-compatible aliases so route files don't need to change
+    createInvoice: handleCreateInvoice,
+    fetchInvoice: handleFetchInvoice,
+    fetchAllInvoices: handleFetchAllInvoices,
 }

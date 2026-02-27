@@ -1,77 +1,118 @@
+//   GET  /supplier          — list all suppliers
+//   GET  /supplier/:id      — get a supplier's full memory profile
+//   GET  /supplier/:id/context — get the 4-layer AI context for a supplier
+//   POST /supplier          — create a new supplier
+
 const prisma = require("../config/prisma")
 const { buildContext } = require("../services/contextService")
 const { getDetailedRisk } = require("../services/riskService")
 const { getMemoriesForSupplier } = require("../services/memoryService")
 
-// List all suppliers
-async function listSuppliers(req, res) {
+// GET /supplier
+// Returns all suppliers with their event and invoice counts.
+// Used on the Suppliers list page.
+async function listAllSuppliers(req, res) {
     try {
         const suppliers = await prisma.supplier.findMany({
             orderBy: { id: "asc" },
             include: {
-                _count: { select: { events: true, invoices: true } },
+                // Include counts of related records so the UI can display them without extra queries
+                _count: {
+                    select: { events: true, invoices: true },
+                },
             },
         })
         res.json(suppliers)
     } catch (error) {
-        console.error(error)
-        res.status(500).json({ error: "Failed to fetch suppliers" })
+        console.error("[SupplierController] Error fetching supplier list:", error)
+        res.status(500).json({ error: "Could not fetch suppliers." })
     }
 }
 
-// Get a single supplier with memory + risk
-async function getSupplier(req, res) {
+
+// GET /supplier/:id
+// Returns a supplier's full profile including:
+//   - All their logged events
+//   - Their 5 most recent invoices
+//   - A ranked memory breakdown (fresh / stale / archived)
+//   - A detailed risk score and per-event breakdown
+async function getSupplierProfile(req, res) {
     try {
-        const { id } = req.params
+        const supplierId = parseInt(req.params.id)
+
         const supplier = await prisma.supplier.findUnique({
-            where: { id: parseInt(id) },
+            where: { id: supplierId },
             include: {
-                events: { orderBy: { createdAt: "desc" } },
-                invoices: { orderBy: { createdAt: "desc" }, take: 5 },
+                events: { orderBy: { createdAt: "desc" } },         // all events, newest first
+                invoices: { orderBy: { createdAt: "desc" }, take: 5 }, // only last 5 invoices
             },
         })
-        if (!supplier) return res.status(404).json({ error: "Supplier not found" })
 
+        if (!supplier) {
+            return res.status(404).json({ error: "Supplier not found." })
+        }
+
+        // Fetch memories and risk score at the same time to keep things fast
         const [memories, riskData] = await Promise.all([
-            getMemoriesForSupplier(id),
-            getDetailedRisk(id),
+            getMemoriesForSupplier(supplierId),
+            getDetailedRisk(supplierId),
         ])
 
         res.json({ supplier, memories, riskData })
     } catch (error) {
-        console.error(error)
-        res.status(500).json({ error: "Failed to fetch supplier profile" })
+        console.error("[SupplierController] Error fetching supplier profile:", error)
+        res.status(500).json({ error: "Could not load supplier profile." })
     }
 }
 
-// Get full layered context for a supplier
-async function getSupplierContext(req, res) {
+
+// GET /supplier/:id/context
+// Returns the full 4-layer AI context for a supplier.
+// Uses the same context-building logic as invoice processing.
+// Useful for exploring a supplier's memory outside of an invoice decision.
+async function getAIContextForSupplier(req, res) {
     try {
-        const { id } = req.params
-        const context = await buildContext(id)
+        const context = await buildContext(req.params.id)
         res.json(context)
     } catch (error) {
-        console.error(error)
-        res.status(error.message === "Supplier not found" ? 404 : 500).json({ error: error.message })
+        console.error("[SupplierController] Error building supplier context:", error)
+
+        // Return 404 if the supplier doesn't exist, otherwise 500
+        const statusCode = error.message === "Supplier not found" ? 404 : 500
+        res.status(statusCode).json({ error: error.message })
     }
 }
 
-// Create a new supplier
-async function createSupplier(req, res) {
+
+// POST /supplier
+// Creates a new supplier with the given name.
+async function createNewSupplier(req, res) {
     try {
         const { name } = req.body
-        if (!name) return res.status(400).json({ error: "name is required" })
-        const supplier = await prisma.supplier.create({ data: { name } })
-        res.status(201).json(supplier)
+
+        if (!name || !name.trim()) {
+            return res.status(400).json({ error: "A supplier name is required." })
+        }
+
+        const newSupplier = await prisma.supplier.create({
+            data: { name: name.trim() },
+        })
+
+        res.status(201).json(newSupplier)
     } catch (error) {
-        console.error(error)
-        res.status(500).json({ error: "Failed to create supplier" })
+        console.error("[SupplierController] Error creating supplier:", error)
+        res.status(500).json({ error: "Could not create the supplier." })
     }
 }
 
 module.exports = {
-    listSuppliers,
-    getSupplier,
-    getSupplierContext,
-    createSupplier,
+    listAllSuppliers,
+    getSupplierProfile,
+    getAIContextForSupplier,
+    createNewSupplier,
+    // Backward-compatible aliases so existing route files don't break
+    listSuppliers: listAllSuppliers,
+    getSupplier: getSupplierProfile,
+    getSupplierContext: getAIContextForSupplier,
+    createSupplier: createNewSupplier,
 }

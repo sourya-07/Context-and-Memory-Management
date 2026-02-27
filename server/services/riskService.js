@@ -1,49 +1,58 @@
-const prisma = require("../config/prisma")
-const {
-    calculateDecay,
-    getMemoryStatus,
-    computeRelevanceScore,
-    getAgeInMonths,
-} = require("./memoryService")
+// Calculates how risky a supplier is, based on their full event history.
+// Each past event contributes to total risk score, but older events contribute less
+// because their memory decays exponentially over time.
 
-function calculateEventRisk(event) {
-    const decay = calculateDecay(event.createdAt, event.memoryTag)
+const prisma = require("../config/prisma")
+const { calculateDecay, getMemoryStatus, computeRelevanceScore, getAgeInMonths } = require("./memoryService")
+
+
+// Calculate how much a single event raises the overall risk score.
+// This combines severity, financial impact, how recent the event is, and confidence.
+// Note: costScore divides by 1,00,000 (₹1L) to normalize the cost into a 0–1 range.
+function calculateSingleEventRisk(event) {
+    const decayFactor = calculateDecay(event.createdAt, event.memoryTag)
+
     const severityScore = 0.4 * event.severity
-    const costScore = 0.3 * (event.impactCost / 100000)
-    const decayScore = 0.2 * decay
+    const costScore = 0.3 * (event.impactCost / 100000)  // normalized to ₹1L
+    const recencyScore = 0.2 * decayFactor
     const confidenceScore = 0.1 * event.confidence
-    return severityScore + costScore + decayScore + confidenceScore
+
+    return severityScore + costScore + recencyScore + confidenceScore
 }
+
+
+// Quick risk score — just a single number between 0 and 1.
+// Used when processing a new invoice to decide APPROVED / REVIEW / HOLD.
 
 async function getSupplierRisk(supplierId) {
     const id = parseInt(supplierId)
-    const events = await prisma.event.findMany({ where: { supplierId: id } })
+    const allEvents = await prisma.event.findMany({ where: { supplierId: id } })
 
     let totalRisk = 0
-    for (const event of events) {
-        totalRisk += calculateEventRisk(event)
+    for (const event of allEvents) {
+        totalRisk += calculateSingleEventRisk(event)
     }
 
-    if (totalRisk > 1) totalRisk = 1
-    return totalRisk
+    // Risk score is capped at 1.0 — anything above that is still "maximum risk"
+    return Math.min(totalRisk, 1)
 }
 
-/**
- * Returns detailed risk breakdown including per-event contributions and staleness flags.
- */
+// Detailed risk breakdown — used inside the AI context layers.
+// Returns the overall score plus per-event contributions and staleness flags.
 async function getDetailedRisk(supplierId) {
     const id = parseInt(supplierId)
-    const events = await prisma.event.findMany({
+
+    const allEvents = await prisma.event.findMany({
         where: { supplierId: id },
-        orderBy: { createdAt: "desc" },
+        orderBy: { createdAt: "desc" },  // most recent first
     })
 
     let totalRisk = 0
-    const breakdown = []
-    const stalenessFlags = []
+    const eventBreakdown = []   // how much each event contributes
+    const stalenessWarnings = []  // events the UI should flag as old
 
-    for (const event of events) {
-        const contribution = calculateEventRisk(event)
+    for (const event of allEvents) {
+        const contribution = calculateSingleEventRisk(event)
         const status = getMemoryStatus(event)
         const decay = parseFloat(calculateDecay(event.createdAt, event.memoryTag).toFixed(3))
         const relevance = parseFloat(computeRelevanceScore(event).toFixed(3))
@@ -51,7 +60,7 @@ async function getDetailedRisk(supplierId) {
 
         totalRisk += contribution
 
-        breakdown.push({
+        eventBreakdown.push({
             eventId: event.id,
             type: event.type,
             contribution: parseFloat(contribution.toFixed(3)),
@@ -64,31 +73,27 @@ async function getDetailedRisk(supplierId) {
             memoryTag: event.memoryTag,
         })
 
+        // Stale and archived events should be highlighted in the UI so the user
+        // knows they carry less weight than recent ones
         if (status === "stale" || status === "archived") {
-            stalenessFlags.push({
+            stalenessWarnings.push({
                 eventId: event.id,
                 type: event.type,
                 status,
                 ageMonths,
-                note:
-                    status === "archived"
-                        ? "Event is over 24 months old. Minimal risk influence."
-                        : "Event is 12–24 months old. Downweighted in risk calculation.",
+                note: status === "archived"
+                    ? "This event is over 24 months old. It has minimal influence on today's risk score."
+                    : "This event is 12–24 months old. It is downweighted in the risk calculation.",
             })
         }
     }
 
-    if (totalRisk > 1) totalRisk = 1
-
     return {
-        riskScore: totalRisk,
-        breakdown,
-        stalenessFlags,
-        eventCount: events.length,
+        riskScore: Math.min(totalRisk, 1),  // capped at 1.0
+        breakdown: eventBreakdown,
+        stalenessFlags: stalenessWarnings,
+        eventCount: allEvents.length,
     }
 }
 
-module.exports = {
-    getSupplierRisk,
-    getDetailedRisk,
-}
+module.exports = { getSupplierRisk, getDetailedRisk }

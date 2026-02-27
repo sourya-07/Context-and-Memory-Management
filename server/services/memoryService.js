@@ -1,60 +1,43 @@
-/**
- * memoryService.js
- * Core memory retrieval engine for the AI agent.
- * Handles memory categorization, freshness scoring, staleness detection,
- * and ranked retrieval to balance comprehensive context vs overload.
- */
+// The core memory engine — decides how "relevant" each past event is to a decision today.
+// Newer events matter more than old ones. The score decays over time (like human memory).
 
 const prisma = require("../config/prisma")
 
-// Staleness thresholds (in months)
-const FRESH_THRESHOLD = 12
-const STALE_THRESHOLD = 24
+// events older than this are considered stale
+const FRESH_LIMIT = 12  // months
+const STALE_LIMIT = 24  // months
 
-/**
- * Calculate how many months ago an event occurred
- */
+// how many months ago did this event happen?
 function getAgeInMonths(createdAt) {
     const now = new Date()
-    const eventDate = new Date(createdAt)
-    return (now - eventDate) / (1000 * 60 * 60 * 24 * 30)
+    const then = new Date(createdAt)
+    return (now - then) / (1000 * 60 * 60 * 24 * 30)
 }
 
-/**
- * Determine memory lifecycle status
- * Rules:
- *   - memoryTag === "evergreen"  → always "evergreen" (never expires)
- *   - age < 12 months           → "fresh"
- *   - 12-24 months              → "stale"
- *   - > 24 months               → "archived"
- */
+// fresh, stale, archived, or evergreen
+// evergreen events never expire (e.g. a contract term)
 function getMemoryStatus(event) {
     if (event.memoryTag === "evergreen") return "evergreen"
-    const ageMonths = getAgeInMonths(event.createdAt)
-    if (ageMonths < FRESH_THRESHOLD) return "fresh"
-    if (ageMonths < STALE_THRESHOLD) return "stale"
+
+    const age = getAgeInMonths(event.createdAt)
+    if (age < FRESH_LIMIT) return "fresh"
+    if (age < STALE_LIMIT) return "stale"
     return "archived"
 }
 
-/**
- * Temporal decay factor — older memories contribute less to risk.
- * Uses exponential decay: e^(-λ × months)
- */
+// older memories should matter less — exponential decay
+// evergreen ones always stay at 1.0 (full weight)
 function calculateDecay(createdAt, memoryTag) {
     if (memoryTag === "evergreen") return 1.0
     const months = getAgeInMonths(createdAt)
-    const lambda = 0.2
-    return Math.exp(-lambda * months)
+    return Math.exp(-0.2 * months)
 }
 
-/**
- * Composite relevance score for ranking memories.
- * Higher = more important to surface.
- * Formula: 0.4×severity + 0.3×decayedRecency + 0.2×normalizedCost + 0.1×confidence
- */
+// composite score to rank events by how important they are right now
+// severity matters most, then how recent it is, then cost, then confidence
 function computeRelevanceScore(event) {
     const decay = calculateDecay(event.createdAt, event.memoryTag)
-    const normalizedCost = Math.min(event.impactCost / 500000, 1) // cap at 5L
+    const normalizedCost = Math.min(event.impactCost / 500000, 1)
     return (
         0.4 * event.severity +
         0.3 * decay +
@@ -63,12 +46,10 @@ function computeRelevanceScore(event) {
     )
 }
 
-/**
- * Rank events by relevance score (descending)
- */
+// sort events from most to least relevant
 function rankMemories(events) {
     return events
-        .map((event) => ({
+        .map(event => ({
             ...event,
             memoryStatus: getMemoryStatus(event),
             decayFactor: parseFloat(calculateDecay(event.createdAt, event.memoryTag).toFixed(3)),
@@ -78,44 +59,40 @@ function rankMemories(events) {
         .sort((a, b) => b.relevanceScore - a.relevanceScore)
 }
 
-/**
- * Summarize a set of ranked memories into concise text.
- * Prevents information overload by capping at top 3 for narrative.
- */
+// turn ranked events into a quick text summary for the decision log
 function summarizeMemory(rankedEvents) {
     if (rankedEvents.length === 0) {
         return "No historical events found for this supplier. No prior risk context available."
     }
 
-    const freshEvents = rankedEvents.filter((e) => e.memoryStatus === "fresh")
-    const staleEvents = rankedEvents.filter((e) => e.memoryStatus === "stale")
-    const archivedEvents = rankedEvents.filter((e) => e.memoryStatus === "archived")
-    const evergreenEvents = rankedEvents.filter((e) => e.memoryStatus === "evergreen")
+    const fresh = rankedEvents.filter(e => e.memoryStatus === "fresh")
+    const stale = rankedEvents.filter(e => e.memoryStatus === "stale")
+    const archived = rankedEvents.filter(e => e.memoryStatus === "archived")
+    const evergreen = rankedEvents.filter(e => e.memoryStatus === "evergreen")
 
     const totalLoss = rankedEvents.reduce((sum, e) => sum + e.impactCost, 0)
     const avgSeverity = rankedEvents.reduce((sum, e) => sum + e.severity, 0) / rankedEvents.length
-    const topEvents = rankedEvents.slice(0, 3)
 
-    let summary = `Historical memory: ${rankedEvents.length} total events — `
-    summary += `${freshEvents.length} fresh, ${staleEvents.length} stale, ${archivedEvents.length} archived, ${evergreenEvents.length} evergreen.\n`
-    summary += `Total documented impact cost: ₹${totalLoss.toLocaleString("en-IN")}. Avg severity: ${(avgSeverity * 10).toFixed(1)}/10.\n`
+    // only show the top 3 to avoid overwhelming the decision context
+    const top3 = rankedEvents.slice(0, 3)
 
-    if (topEvents.length > 0) {
-        summary += `Top critical memories:\n`
-        topEvents.forEach((e, i) => {
-            summary += `  ${i + 1}. [${e.type.toUpperCase()}] Severity ${e.severity}/1 — ₹${e.impactCost.toLocaleString("en-IN")} impact — ${e.memoryStatus} (${e.ageMonths} months ago)`
-            if (e.description) summary += ` — "${e.description}"`
-            summary += `\n`
+    let text = `Historical memory: ${rankedEvents.length} total events — `
+    text += `${fresh.length} fresh, ${stale.length} stale, ${archived.length} archived, ${evergreen.length} evergreen.\n`
+    text += `Total documented loss: ₹${totalLoss.toLocaleString("en-IN")}. Avg severity: ${(avgSeverity * 10).toFixed(1)}/10.\n`
+
+    if (top3.length > 0) {
+        text += `Top memories:\n`
+        top3.forEach((e, i) => {
+            text += `  ${i + 1}. [${e.type.toUpperCase()}] Severity ${e.severity} — ₹${e.impactCost.toLocaleString("en-IN")} — ${e.memoryStatus} (${e.ageMonths} months ago)`
+            if (e.description) text += ` — "${e.description}"`
+            text += `\n`
         })
     }
 
-    return summary.trim()
+    return text.trim()
 }
 
-/**
- * Main export: fetch all events for a supplier, enrich with memory metadata,
- * rank by relevance, and return structured memory object.
- */
+// main function: get all events for a supplier, rank them, return structured memory object
 async function getMemoriesForSupplier(supplierId) {
     const id = parseInt(supplierId)
     const events = await prisma.event.findMany({
@@ -126,19 +103,11 @@ async function getMemoriesForSupplier(supplierId) {
     const ranked = rankMemories(events)
     const summary = summarizeMemory(ranked)
 
-    // Categorize for structured output
-    const fresh = ranked.filter((e) => e.memoryStatus === "fresh" || e.memoryStatus === "evergreen")
-    const stale = ranked.filter((e) => e.memoryStatus === "stale")
-    const archived = ranked.filter((e) => e.memoryStatus === "archived")
+    const fresh = ranked.filter(e => e.memoryStatus === "fresh" || e.memoryStatus === "evergreen")
+    const stale = ranked.filter(e => e.memoryStatus === "stale")
+    const archived = ranked.filter(e => e.memoryStatus === "archived")
 
-    return {
-        totalEvents: events.length,
-        ranked,
-        fresh,
-        stale,
-        archived,
-        summary,
-    }
+    return { totalEvents: events.length, ranked, fresh, stale, archived, summary }
 }
 
 module.exports = {
