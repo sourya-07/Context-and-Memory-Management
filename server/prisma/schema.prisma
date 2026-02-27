@@ -17,14 +17,16 @@ model Supplier {
 }
 
 model Event {
-  id         Int      @id @default(autoincrement())
-  supplier   Supplier @relation(fields: [supplierId], references: [id])
-  supplierId Int
-  type       String
-  severity   Float
-  impactCost Float
-  confidence Float
-  createdAt  DateTime @default(now())
+  id          Int      @id @default(autoincrement())
+  supplier    Supplier @relation(fields: [supplierId], references: [id])
+  supplierId  Int
+  type        String
+  severity    Float
+  impactCost  Float
+  confidence  Float
+  description String?  @db.Text
+  memoryTag   String?  @default("time_sensitive")
+  createdAt   DateTime @default(now())
 }
 
 model Invoice {
@@ -37,9 +39,10 @@ model Invoice {
 }
 
 model DecisionLog {
-  id          Int      @id @default(autoincrement())
-  invoiceId   Int
-  riskScore   Float
-  explanation String
-  createdAt   DateTime @default(now())
+  id              Int      @id @default(autoincrement())
+  invoiceId       Int
+  riskScore       Float
+  explanation     String
+  contextSnapshot String?  @db.LongText
+  createdAt       DateTime @default(now())
 }

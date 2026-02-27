@@ -1,6 +1,8 @@
 const express = require("express")
 const dotenv = require("dotenv")
 const invoiceRoutes = require("./routes/invoiceRoutes")
+const supplierRoutes = require("./routes/supplierRoutes")
+const eventRoutes = require("./routes/eventRoutes")
 const { connectRedis } = require("./config/redis")
 const cors = require("cors")
 
@@ -13,10 +15,12 @@ app.use(cors())
 app.use(express.json())
 
 app.get("/", (req, res) => {
-    res.send("Hello World!")
+    res.send("Context & Memory Management API — running")
 })
 
 app.use("/invoice", invoiceRoutes)
+app.use("/supplier", supplierRoutes)
+app.use("/event", eventRoutes)
 
 async function startServer() {
     await connectRedis()
