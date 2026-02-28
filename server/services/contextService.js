@@ -11,7 +11,7 @@
 
 const { getMemoriesForSupplier } = require("./memoryService")
 const { getDetailedRisk } = require("./riskService")
-const { redisClient } = require("../config/redis")
+const { safeGet, safeSetEx, safeDel } = require("../config/redis")
 const prisma = require("../config/prisma")
 
 // How long to keep a context result in Redis (5 minutes)
@@ -74,25 +74,20 @@ async function buildContext(supplierId, immediateData = {}) {
     const cacheKey = `context:supplier:${id}`
 
     // ── Try Redis first ────────────────────────────────────────────────────
-    try {
-        const cachedResult = await redisClient.get(cacheKey)
-        if (cachedResult) {
-            console.log(`[Context] Serving supplier ${id} context from Redis cache`)
-            const parsed = JSON.parse(cachedResult)
+    const cached = await safeGet(cacheKey)
+    if (cached) {
+        console.log(`[Context] Serving supplier ${id} context from Redis cache`)
+        const parsed = JSON.parse(cached)
 
-            // Inject the current invoice amount into the cached result before returning
-            if (immediateData.invoiceAmount) {
-                parsed.immediateContext.invoiceAmount = immediateData.invoiceAmount
-            }
-
-            parsed.cacheHit = true
-            return parsed
+        // Inject the current invoice amount into the cached result before returning
+        if (immediateData.invoiceAmount) {
+            parsed.immediateContext.invoiceAmount = immediateData.invoiceAmount
         }
-        console.log(`[Context] Cache miss for supplier ${id} — computing fresh context`)
-    } catch (redisError) {
-        // Redis might be down — that's okay, we'll just compute fresh every time
-        console.warn("[Context] Redis unavailable, skipping cache:", redisError.message)
+
+        parsed.cacheHit = true
+        return parsed
     }
+    console.log(`[Context] Cache miss for supplier ${id} — computing fresh context`)
 
     // ── Fetch supplier from DB ─────────────────────────────────────────────
     const supplier = await prisma.supplier.findUnique({ where: { id } })
@@ -208,13 +203,8 @@ async function buildContext(supplierId, immediateData = {}) {
         explanation,
     }
 
-    // ── Cache in Redis ─────────────────────────────────────────────────────
-    try {
-        await redisClient.setEx(cacheKey, CACHE_LIFETIME_SECONDS, JSON.stringify(contextResult))
-    } catch (redisError) {
-        // Non-fatal — we still return the result, it just won't be cached
-        console.warn("[Context] Could not save to Redis cache:", redisError.message)
-    }
+    // ── Cache in Redis (non-fatal if Redis is unavailable) ────────────────
+    await safeSetEx(cacheKey, CACHE_LIFETIME_SECONDS, JSON.stringify(contextResult))
 
     return contextResult
 }
@@ -261,12 +251,8 @@ function buildDecisionExplanation(immediate, historical, temporal, experiential)
 // so the next invoice decision uses up-to-date information.
 // ─────────────────────────────────────────────────────────────────────────────
 async function invalidateSupplierCache(supplierId) {
-    try {
-        await redisClient.del(`context:supplier:${supplierId}`)
-        console.log(`[Context] Cache cleared for supplier ${supplierId}`)
-    } catch (err) {
-        console.warn("[Context] Cache invalidation failed:", err.message)
-    }
+    await safeDel(`context:supplier:${supplierId}`)
+    console.log(`[Context] Cache cleared for supplier ${supplierId}`)
 }
 
 // Export under both old and new names so existing code doesn't break
